@@ -1,0 +1,1471 @@
+---
+title: "SET Rate Calculations"
+date: "`r Sys.Date()`"
+output: word_document
+always_allow_html: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, error = TRUE)
+```
+
+In this report, the user may have chosen to exclude data associated with certain QA/QC codes. Any values that have been removed are listed in the appropriate section below.    
+
+Also, be aware that linear models are not appropriate for calculating rates of change at all sites. Use discretion when interpreting these results.  
+
+
+# Background on the data  
+
+
+
+```{r load-libraries}
+library(knitr)
+library(forcats)
+library(readr)
+library(janitor)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(nlme)
+library(broom)
+library(here)
+library(flextable)
+library(readxl)
+library(lubridate)
+library(leaflet)
+library(stringr)
+
+# load functions
+source(here::here('R_scripts', 'sourced', '000_functions.R'))
+# load user options
+source(here::here('R_scripts', 'sourced', '001_user_options.R'))
+# user options script deals with qaqc codes
+
+
+# if for some reason the output directory for individual SET figures 
+# doesn't exist, create it
+ind_set_dir <- here::here("R_output", "figures", "cumu_change_plots", "individual_sets")
+if(!dir.exists(ind_set_dir)) dir.create(ind_set_dir)
+rm(ind_set_dir)
+```
+
+
+## Data and metadata setup  
+
+We start by reading in the long SET measurement dataset, converted from other formats by earlier scripts. Pin heights have also been converted to mm if they weren't already in those units.  
+
+
+```{r read-data, warning = TRUE}
+# find the folder with processed data
+path <- here::here('data', 'processed')
+
+# in that folder, find the name of the file(s) that ends with 'set_processed.csv'
+filelist <- dir(path, pattern = "set_processed.csv$")
+
+
+# generate warnings if the folder is empty; if there are multiple matching files, select the first one
+if (length(filelist) == 0) stop("There are no files of the correct name/format (---set_QC.csv) in your processed data folder.")
+
+if (length(filelist) > 1) {
+  warning("There is more than one file of the correct format (---set_QC.csv) in your data folder. The first file alphabetically will be used.")
+  filelist <- filelist[1]
+}
+
+
+
+# generate the full path to the file; read it in and get pin heights to mm
+filename <- paste0(path, "/", filelist)
+dat <- read_csv(filename)
+dat <- height_to_mm(dat)
+
+# if there isn't a reserve column in the data,
+# pull it from the file name
+# this could end poorly if someone's working with a
+# file that doesn't match the required naming conventions
+# but there's a lot of grouping based on reserve, so it has to exist
+if(!exists("reserve", dat)){
+  dat$reserve <- toupper(str_extract(filename, "[:alpha:]{3}(?=set)"))
+} 
+
+# get rid of any placeholders; make sure set_id is a factor;
+# make sure reserve, station, arm_position, and pin_number are character vectors
+# paste year, month, and day together into "date"
+dat <- dat %>%
+  mutate(date = lubridate::ymd(paste(year, month, day))) %>% 
+  filter(!is.na(date),
+         !is.na(pin_number)) %>%
+  mutate_at(c("reserve", "set_id",   
+              "arm_position", "arm_qaqc_code", 
+              "pin_number", "qaqc_code"),
+            as.character)
+
+
+# pull out dates in the dataset
+start_whole <- min(dat$date)
+end_whole <- max(dat$date)
+```
+
+This dataset spans the dates **`r start_whole`** to **`r end_whole`**.  
+
+If custom start and/or end dates were specified for this analysis, the dataset is subsetted here and the chosen date range will be printed below this paragraph. These options can be changed in the file `metadata/user_defined_inputs.xlsx`.  
+
+```{r trim-data}
+# trim the dataset based on user-specified dates
+if(!is.na(opts_long$custom_start)){
+  start <- lubridate::ymd(opts_long$custom_start)
+  dat <- dat %>% 
+    filter(date >= start)
+  print(paste0("The custom start date is ", start))
+}
+if(!is.na(opts_long$custom_end)){
+  end <- lubridate::ymd(opts_long$custom_end)
+  dat <- dat %>% 
+    filter(date <= end)
+  print(paste0("The custom end date is ", end))
+}
+```
+
+
+## QA/QC codes  
+
+In the same `user_defined_inputs` spreadsheet, certain qa/qc codes may have been specified for removal in this analysis. In the `qaqc_codes` worksheet, they were labeled with "-3", to be consistent with SWMP's water quality/weather/nutrient "reject" flagging. If such values are present, they will be printed below, then turned into NAs so they are not used in the analysis.
+
+**Note** that the code looks for an EXACT match. e.g., if "LHE" is specified for removal, only values with "LHE" will be removed. "LHE CB" and "CRM LHE" will *not* be removed. To remove a combination of codes, a new line may need to be created in the `qaqc_codes` tab of the input spreadsheet.  
+
+```{r qc-remove}
+if (excl_exist) {
+  # find the rows to exclude - either arm or pin codes match
+  pin_to_excl <- which(dat$qaqc_code %in% codes_to_exclude)
+  arm_to_excl <- which(dat$arm_qaqc_code %in% codes_to_exclude)
+  
+  # make a data frame of the excluded ones and print it out
+  to_excl <- c(pin_to_excl, arm_to_excl)
+  excluded <- dat[to_excl, ]
+  
+  
+  # print only if there's at least one row
+  if(nrow(excluded) > 0){
+    cat("The following QA/QC codes were labeled for exclusion: \n")
+    cat(codes_to_exclude, sep = "\n")
+    cat("\nThe data points that have been excluded are: \n \n")
+    excluded %>% 
+      select(set_id, date, 
+             arm = arm_position, 
+             arm_code = arm_qaqc_code, 
+             pin_number, qaqc_code, pin_height) %>% 
+      knit_print()
+  } else {cat("The following QA/QC codes were labeled for exclusion. There were no data values flagged with those codes, so all data values are present in this analysis: \n"); cat(codes_to_exclude, sep = "/n")}
+  
+  
+  # turn the heights into NAs
+  dat$pin_height[to_excl] <- NA 
+  
+  # clean up
+  # rm(list = c("excluded", "arm_to_excl", "pin_to_excl", "to_excl"))
+} else {cat("No QA/QC codes were labeled for exclusion. All data values are present.")}
+```
+
+
+### File Matching checks  
+
+This analysis was run on **`r filelist[1]`** on *`r Sys.Date()`*.  
+
+If any mismatches between the data and metadata files are present, they will be noted below. The user of this report will need to make any necessary changes in the data/metadata files.  
+
+
+```{r read-metadata, warning = TRUE}
+# Make sure a metadata file exists 
+
+# find the folder with metadata
+path <- here::here('metadata')
+
+# in that folder, find the name of the file(s) that ends with 'setm.csv'
+filelist <- dir(path, pattern = 'set_metadata.xls')
+
+# generate warnings if the folder is empty; if there are multiple matching files, select the first one
+if (length(filelist) == 0) stop("There are no files of the correct name/format (---set_metadata.xls or .xlsx) in your metadata folder.")
+
+if (length(filelist) > 1) {
+  warning("There is more than one file of the correct format (---set_metadata.xls or .xlsx) in your metadata folder. The first file alphabetically will be used.")
+  filelist <- filelist[1]
+}
+
+# generate the full path to the file; read it in, clean the names, get rid of empty rows and columns
+# make sure everything that needs to be a character is a character
+filename <- paste0(path, "/", filelist)
+mdat <- read_excel(filename) %>%
+  janitor::clean_names() %>%
+  janitor::remove_empty(which = "rows") %>% 
+  mutate_at(c("unique_set_id", "user_friendly_set_name", "reserve"),
+            as.character)
+```
+
+
+
+
+```{r verify-setid, warning = TRUE}
+# Make sure the same SET IDs exist in both the data and metadata file: 
+
+# first pull out set_id from both data frames
+data_setid <- unique(as.character(dat$set_id))
+metadata_setid <- unique(mdat$unique_set_id)
+
+# find set_ids that are in the data, but not in the metadata
+dat_not_m <- setdiff(data_setid, metadata_setid)
+# find set_ids that are in the metadata, but not in the data
+m_not_dat <- setdiff(metadata_setid, data_setid)
+
+if (length(dat_not_m) > 0) {
+  toprint <- paste(dat_not_m, collapse = ", ")
+  warning(paste0("The following SET IDs exist in your data, but not in your metadata: ", toprint))
+}
+
+if (length(m_not_dat) > 0) {
+  toprint <- paste(m_not_dat, collapse = ", ")
+  warning(paste0("The following SET IDs exist in your metadata, but not in your data: ", toprint))
+}
+
+if (length(dat_not_m) + length(m_not_dat) == 0) {
+  cat("SET IDs match in your data and metadata files.")
+}
+
+# go ahead and order the set_ids in dat and unique_set_id in mdat by the metadata's numerical_order, if available
+# if this step is skipped, they should remain in character format
+if (!anyNA(mdat$numerical_order)){
+  mdat_sub <- select(mdat, unique_set_id, numerical_order) %>% 
+    mutate(unique_set_id = factor(unique_set_id))
+  dat <- dat %>% 
+    mutate(set_id = factor(set_id)) %>% 
+    left_join(., mdat_sub, by = c("set_id" = "unique_set_id")) %>% 
+    mutate(set_id = fct_reorder(set_id, numerical_order)) %>% 
+    select(-numerical_order)
+  mdat <- mdat %>% 
+    mutate(unique_set_id = factor(unique_set_id),
+           unique_set_id = fct_reorder(unique_set_id, numerical_order))
+  rm(mdat_sub)
+}
+
+# cleanup
+rm(dat_not_m, m_not_dat, metadata_setid, data_setid, filelist, path)
+```
+
+
+
+
+
+```{r read-slr}
+# Read in general sea-level rates sheet and pull out the rate that matches the reserve.
+
+slr_file <- here::here('metadata', 'slr_rates.csv')
+slr_rates <- read_csv(slr_file) %>%
+  clean_names() %>%
+  janitor::remove_empty(which = c("rows", "cols"))
+```
+
+
+
+```{r verify-slr, warning = TRUE}
+# Pull out the information relevant to the current reserve. Assign relevant values to objects and print out the table with information about the site.
+
+res_to_match <- unique(dat$reserve)
+
+if (res_to_match %in% unique(slr_rates$reserve)) {
+  slr_res <- slr_rates %>%
+    filter(reserve == res_to_match) %>%
+    select(-link)
+  slr <- slr_res$slr_rate_mm_yr
+  slr_ci <- slr_res$x95_percent_ci
+  yr19chng <- slr_res$slr_19yr
+  yr19_ci <- slr_res$ci95_19yr
+} else {warning(paste("This reserve does not have an entry in the sea level rise rates file. Please check metadata/slr_rates.csv and enter a value using", res_to_match, "as the reserve code."))}
+```
+
+
+
+# Background information  
+
+
+## Reserve-level characteristics  
+
+
++  The local, long-term rate of sea level change is **`r slr`** +/- **`r slr_ci`** mm/yr.  
++  This rate is reported by `r slr_res$nearest_nwlon_station`, NWLON station number `r as.character(slr_res$nwlon_station_number)` based on data from *`r slr_res$data_start`* to *`r slr_res$data_end`*.  
++  A shorter-term rate of water level change based on 19 years of data from the same NWLON station, using the same methods NOAA uses to calculate long-term sea level rise, is **`r yr19chng`** +/- **`r yr19_ci`** mm/yr. This date range is from *`r slr_res$yr19_start`* to *`r slr_res$yr19_end`*.  
++  The technical report on NOAA's calculation of long-term SLR trends, *Technical Report NOS CO-OPS 053; Sea Level Variations of the United States 1854-2006* can be found here: https://tidesandcurrents.noaa.gov/publications/Tech_rpt_53.pdf  (possibly cite as Zervas 2009?)  
+
+# KIM CHECK ON CITATION ABOVE  
+
+
+## SET-level characteristics  
+
+### setting  
+
+
+```{r set-info-table}
+# print the table
+# what to print depends on whether lat/long are to be included
+
+if(opts_long$coords_tech == 1){
+  mdat %>% 
+    select(unique_set_id, set_type, latitude_dec_deg, 
+           longitude_dec_deg, co_dominant_species1) %>% 
+    arrange(unique_set_id) %>% 
+    setNames(c("SET_ID", "Type", "Lat", "Long", "Main_Veg")) %>% 
+    flextable() %>% 
+    theme_booktabs() %>% 
+    autofit()
+} else {
+  mdat %>% 
+    select(unique_set_id, set_type, co_dominant_species1) %>% 
+    arrange(unique_set_id) %>% 
+    setNames(c("SET_ID", "Type", "Main_Veg")) %>% 
+    flextable() %>% 
+    theme_booktabs() %>% 
+    autofit()
+}
+```
+
+
+
+### sampling information  
+
+```{r sampling-info-table}
+sample_info <- dat %>% 
+  group_by(set_id) %>% 
+  summarize(first_sampled = min(date),
+            last_sampled = max(date),
+            years_sampled = as.double(max(date) - min(date)) / 365.25,
+            sample_events = length(unique(date))) 
+
+sample_info %>% 
+  flextable() %>% 
+  theme_booktabs() %>% 
+  autofit()
+```
+
+
+
+
+***
+
+### Cumulative change snapshot  
+
+Take a look at your overall change since the first reading - make sure the change looks generally linear, and make sure there are no big breaks in the data that could influence the outputs. Output will be generated even if it is not appropriate - **it is up to you to use discretion and make sure a linear model is appropriate for the data!**
+
+```{r cumu-change, fig.width = opts_long$width_square, fig.height = opts_long$height_square}
+dat_cumu <- calc_change_cumu(dat)
+
+# without linear regression
+plot_cumu_set(dat_cumu$set, columns = opts_long$multi_cols, smooth = FALSE)
+
+# save it
+out_name <- paste("R_output", "figures", "cumu_change_plots", "cumu_change_noLine.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = opts_long$width_square, height = opts_long$height_square, units = "in")
+
+```
+
+**The above graph is saved as:**   
+_`r out_name`_   
+
+
+
+```{r cumu-change-loop}
+all_sets <- unique(dat_cumu$set$set_id)
+out_path <- paste("R_output", "figures", "cumu_change_plots", "individual_sets", sep = "/")
+
+for(i in seq_along(all_sets)){
+  dat_tmp <- dat_cumu$set[dat_cumu$set$set_id == all_sets[i], ]
+  p <- plot_cumu_set(dat_tmp, columns = 1, smooth = FALSE)
+  plot_name = paste0("cumu_change_noLine_", all_sets[i], ".png")
+  out_name <- paste(out_path, plot_name, sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, units = "in", scale = 0.8)
+}
+```
+
+
+Graphs for each SET individually are not shown here but have been saved in _`r out_path`_
+
+
+```{r cumu-change-line, fig.width = opts_long$width_square, fig.height = opts_long$height_square}
+# with linear regression
+plot_cumu_set(dat_cumu$set, columns = opts_long$multi_cols,
+              pointsize = 2.5)
+
+# save it
+out_name <- paste("R_output", "figures", "cumu_change_plots", "cumu_change_withLine.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = opts_long$width_square, height = opts_long$height_square, units = "in")
+```
+
+**The above graph is saved as:**   
+_`r out_name`_   
+
+
+```{r cumu-change-line-loop}
+out_path <- paste("R_output", "figures", "cumu_change_plots", "individual_sets", sep = "/")
+
+for(i in seq_along(all_sets)){
+  dat_tmp <- dat_cumu$set[dat_cumu$set$set_id == all_sets[i], ]
+  p <- plot_cumu_set(dat_tmp, columns = 1, smooth = TRUE)
+  plot_name = paste0("cumu_change_withLine_", all_sets[i], ".png")
+  out_name <- paste(out_path, plot_name, sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, units = "in", scale = 0.8)
+}
+```
+
+
+Graphs for each SET individually are not shown here but have been saved in _`r out_path`_
+
+
+### Plus Sea Level Rise Line  
+
+**This is an oversimplification of sea level rise**  
+
+It is only meant to illustrate and give context for SET elevation change  
+
+
+
+```{r cumu-plus-slr, fig.width = opts_long$width_square, fig.height = opts_long$height_square}
+
+# put slr slope into "per-day" rather than "per-year" because that's how R thinks
+# 365.25 accounts for leap years
+slr_for_graph <- slr/365.25
+
+# generate a SET-specific intercept based on the first date of sampling at that SET
+# also add in slope because geom_abline doesn't work otherwise
+intercepts <- dat_cumu$set %>% 
+  group_by(set_id) %>% 
+  summarize(min_date = as.integer(min(date))) %>% 
+  mutate(intercept = 0 - (slr_for_graph*min_date),
+         slope = slr_for_graph)
+
+# add the line to the plot
+p <- plot_cumu_set(dat_cumu$set, columns = opts_long$multi_cols,
+                   pointsize = 2,
+                   smooth = FALSE)
+p +
+  geom_smooth(se = FALSE, method = 'lm', 
+              col = 'steelblue4') +
+  geom_abline(data = intercepts,
+              aes(intercept = intercept,
+                  slope = slope),
+              color = "red3",
+              size = 1) +
+  labs(subtitle = "red line has slope of long-term sea level rise; blue line has slope of SET change")
+
+
+# save it
+out_name <- paste("R_output", "figures", "cumu_change_plots", "cumu_change_withLineAndSLR.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = opts_long$width_square, height = opts_long$height_square, units = "in")
+```
+
+**The above graph is saved as:**   
+`r out_name`   
+
+
+```{r cumu-plus-slr-loop}
+out_path <- paste("R_output", "figures", "cumu_change_plots", "individual_sets", sep = "/")
+
+for(i in seq_along(all_sets)){
+  dat_tmp <- dat_cumu$set[dat_cumu$set$set_id == all_sets[i], ]
+  intercepts_tmp <- intercepts[intercepts$set_id == all_sets[i], ]
+  
+  
+  p <- plot_cumu_set(dat_tmp, columns = opts_long$multi_cols,
+                     pointsize = 2,
+                     smooth = FALSE)
+  p <- p +
+    geom_smooth(se = FALSE, method = 'lm', 
+                col = 'steelblue4') +
+    geom_abline(data = intercepts_tmp,
+                aes(intercept = intercept,
+                    slope = slope),
+                color = "red3",
+                size = 1) +
+    labs(subtitle = "red line has slope of long-term sea level rise; blue line has slope of SET change")
+  
+  
+  plot_name = paste0("cumu_change_withLineAndSLR", all_sets[i], ".png")
+  out_name <- paste(out_path, plot_name, sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, units = "in", scale = 0.8)
+}
+```
+
+
+Graphs for each SET individually are not shown here but have been saved in _`r out_path`_
+
+
+```{r cumu-plus-slr-2, fig.width = opts_long$width_square, fig.height = opts_long$height_square}
+# add the line to the plot
+p <- plot_cumu_set(dat_cumu$set, columns = opts_long$multi_cols,
+                   smooth = FALSE,
+                   pointsize = 2)
+p + 
+  geom_abline(data = intercepts,
+              aes(intercept = intercept,
+                  slope = slope),
+              color = "red3",
+              size = 0.8,
+              alpha = 0.9) +
+  labs(title = "Cumulative Change since first reading",
+       subtitle = "red line has the slope of long-term sea level rise")
+
+
+out_name <- paste("R_output", "figures", "cumu_change_plots", "cumu_change_withSLR.png", sep = "/")
+out_file <- here::here(out_name)
+ggsave(out_file, width = opts_long$width_square, height = opts_long$height_square, units = "in")
+```
+
+
+**The above graph is saved as:**   
+`r out_name`   
+
+
+```{r cumu-plus-slr-2-loop}
+out_path <- paste("R_output", "figures", "cumu_change_plots", "individual_sets", sep = "/")
+
+for(i in seq_along(all_sets)){
+  dat_tmp <- dat_cumu$set[dat_cumu$set$set_id == all_sets[i], ]
+  intercepts_tmp <- intercepts[intercepts$set_id == all_sets[i], ]
+  
+  
+  p <- plot_cumu_set(dat_tmp, columns = opts_long$multi_cols,
+                     pointsize = 2,
+                     smooth = FALSE)
+  
+  p <- p + 
+    geom_abline(data = intercepts_tmp,
+                aes(intercept = intercept,
+                    slope = slope),
+                color = "red3",
+                size = 0.8,
+                alpha = 0.9) +
+    labs(title = "Cumulative Change since first reading",
+         subtitle = "red line has the slope of long-term sea level rise")
+  
+  plot_name = paste0("cumu_change_withSLR", all_sets[i], ".png")
+  out_name <- paste(out_path, plot_name, sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, units = "in", scale = 0.8)
+}
+```
+
+
+Graphs for each SET individually are not shown here but have been saved in _`r out_path`_
+
+
+
+```{r cumu-lines-only, fig.width = opts_long$width_square, fig.height = opts_long$height_square}
+# what if we just do it without any points; just smooths?
+ggplot(dat_cumu$set, aes(x = date, y = mean_cumu)) +
+  geom_line(col = 'gray70') +
+  facet_wrap(~set_id, ncol = opts_long$multi_cols) +
+  labs(title = 'Cumulative Change since first reading', 
+       subtitle = 'light gray represents data; blue has slope of SET change; \nred has slope of long-term sea level rise',
+       x = 'Date',
+       y = 'Change since first reading (mm)') +
+  theme_classic() +
+  geom_smooth(se = FALSE, method = 'lm', 
+              col = 'steelblue4',
+              size = 1) +
+  geom_abline(data = intercepts,
+              aes(intercept = intercept,
+                  slope = slope),
+              color = "red3",
+              size = 1)
+
+
+out_name <- paste("R_output", "figures", "cumu_change_plots", "cumu_change_linesOnly.png", sep = "/")
+out_file <- here::here(out_name)
+ggsave(out_file, width = opts_long$width_square, height = opts_long$height_square, units = "in")
+```
+
+
+**The above graph is saved as:**   
+`r out_name`   
+
+
+```{r cumu-lines-only-loop}
+out_path <- paste("R_output", "figures", "cumu_change_plots", "individual_sets", sep = "/")
+
+for(i in seq_along(all_sets)){
+  dat_tmp <- dat_cumu$set[dat_cumu$set$set_id == all_sets[i], ]
+  intercepts_tmp <- intercepts[intercepts$set_id == all_sets[i], ]
+  
+  p <- ggplot(dat_tmp, aes(x = date, y = mean_cumu)) +
+    geom_line(col = 'gray70') +
+    facet_wrap(~set_id, ncol = 1) +
+    labs(title = 'Cumulative Change since first reading', 
+         subtitle = 'light gray represents data; blue has slope of SET change; \nred has slope of long-term sea level rise',
+         x = 'Date',
+         y = 'Change since first reading (mm)') +
+    theme_classic() +
+    geom_smooth(se = FALSE, method = 'lm', 
+                col = 'steelblue4',
+                size = 1) +
+    geom_abline(data = intercepts_tmp,
+                aes(intercept = intercept,
+                    slope = slope),
+                color = "red3",
+                size = 1)
+  
+  
+  plot_name = paste0("cumu_change_linesOnly", all_sets[i], ".png")
+  out_name <- paste(out_path, plot_name, sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, units = "in", scale = 0.8)
+  
+}
+```
+
+
+Graphs for each SET individually are not shown here but have been saved in _`r out_path`_
+
+
+
+## Cumulative change along the elevation gradient  
+
+The following graph shows cumulative elevation change at all SETs in one graph panel. If NAVD88 information was present in metadata, the first reading at each SET was placed at that point on the y-axis. Otherwise, the SET cumulative change lines start at 0.  
+
+
+```{r cumu-navd88, fig.width = opts_long$width_tall, fig.height = opts_long$height_tall}
+# if either column has NO NAs, use the column. Preference goes to ground elevation, then receiver elevation. 
+# then move through partial scenarios: use ground elevation or receiver elevation, or make it NA.
+navd88s <- mdat %>% 
+  select(set_id = unique_set_id, 
+         ends_with("navd88"))%>% 
+  mutate_at(vars(matches("navd88")), as.numeric) %>% 
+  mutate(set_navd88 = case_when(!anyNA(surface_elevation_ground_navd88) ~
+                                  surface_elevation_ground_navd88,
+                                !anyNA(surface_elevation_receiver_navd88) ~
+                                  surface_elevation_receiver_navd88,
+                                !is.na(surface_elevation_ground_navd88) ~
+                                  surface_elevation_ground_navd88,
+                                !is.na(surface_elevation_receiver_navd88) ~
+                                  surface_elevation_receiver_navd88,
+                                TRUE ~ 0))
+
+
+cumu_navd88 <- left_join(dat_cumu$set, navd88s, by = "set_id") %>% 
+  mutate(mean_cumu = (mean_cumu/1000) + set_navd88,
+         set_id = fct_reorder(set_id, desc(set_navd88)))
+
+ggplot(cumu_navd88, aes(x = date, y = mean_cumu, color = set_id)) +
+  geom_line(size = 1) +
+  theme_minimal() +
+  labs(title = "SET cumulative change",
+       subtitle = "first sample date set to that SET's NAVD88 elevation",
+       y = "NAVD88 elevation (m)",
+       color = "SET")
+
+
+out_name <- paste("R_output", "figures", "cumu_change_plots", "cumu_change_NAVD88.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = opts_long$width_tall, height = opts_long$height_tall, units = "in")
+```
+
+
+**The above graph is saved as:**   
+_`r out_name`_   
+
+
+
+
+# Rate Calculations  
+
+
+From this point on, **only SETs with 5 or more measurements over 4.5 or more years will be analyzed**. If you do not have any SETs that have been measured for this amount of time, you will NOT see analyses or graphs below.  
+
+
+```{r find-enough-dat}
+# make a backup
+dat_all <- dat
+
+to_keep <- unlist(sample_info[sample_info$years_sampled >= 4.5 & sample_info$sample_events >= 5, "set_id"])
+
+not_enough_df <- dat[!(dat$set_id %in% to_keep), ]  # stns with not enough data
+dat <- dat[dat$set_id %in% to_keep, ] # stns with enough data
+
+enough_dat <- nrow(dat) > 0 # this will be used to determine the running of future code chunks
+
+partial_dat <- nrow(dat) > 0 & nrow(not_enough_df) > 0  # this will join data frames back together when some sites have enough data and others don't
+```
+
+### SETs that are included in the following analyses  
+
+```{r}
+if(enough_dat){
+  cat(paste(unique(dat$set_id), collapse = ", "))
+}
+```
+
+
+### SETs that are not included in analyses  
+
+```{r}
+if(nrow(not_enough_df) > 0){
+  cat(paste(unique(not_enough_df$set_id), collapse = ", "))
+}
+```
+
+These rates were generated using random-intercept linear mixed models. See Zuur et al. 2009 and Cahoon et al. 2019 for details.
+
+Cahoon, D.R., Lynch, J.C., Roman, C.T. et al. Estuaries and Coasts (2019) 42: 1. https://doi.org/10.1007/s12237-018-0448-x  
+
+Zuur, A.F., E.N. Ieno, N.J. Walker, A.A. Saveliev, and G.M. Smith. 2009. Mixed effects models and extensions in ecology with R. New York: Springer.  
+
+
+
+# LMM wording; clean up (also just above)   
+
+Linear mixed models extend traditional linear regression models by allowing for the inclusion of both fixed and random effects. These types of models are particularly useful when the data are structured hierarchically, as with SET data. Data for each SET is analyzed separately using pin height as the response variable; arm and pin nested in arm are treated as random effects, while date since initial measurement is considered a numeric covariate. As both the intercept and slope include random effects, methods other than least squares must be employed. Next discuss model fitting… All models were fit in R (reference…) using the nlme package (reference…). This type of approach is similar to the analysis performed in Cahoon 2019.
+
+For each SET, we initially considered two LMMs: a LMM that includes a random intercept (with a random effects for arm and for pin nested in arm) and a LMM that includes both a random slope and a random intercept (with random effects for arm and for pin nested in arm). For many SETs, we observed that the random intercept model fit better. At other SETs, the random slope and intercept model seemed to fit better; however, the resulting point estimates showed only small differences. As the random intercept models did not require the same degree of scrutiny when model fitting, we exclusively employed random intercept models in our automated R scripts.  
+
+
+In our case, we have, for each SET:  
+
++  **response variable:** pin_height  
++  **fixed effect:** date  
++  **random effects:** arm_position, pin_number  (note, these are nested)  
+
+## Rates of change  
+
+The LMMs were run using the `lme()` function in the `nlme` package. Confidence intervals were generated using the `intervals()` function, also in the `nlme` package. 
+
+All calculations generated output in *mm/day* and were converted to *mm/yr* by multiplying by 365.25 to account for leap years.    
+
+```{r calc-lmm, eval = enough_dat}
+models2 <- dat %>%
+  group_by(reserve, set_id) %>%
+  do(mod = lme(pin_height ~ date, data = ., random = ~1|arm_position/pin_number, na.action = na.omit))
+
+lmm_out <- models2 %>% 
+  mutate(rate = intervals(mod, which = "fixed")$fixed["date", 2] * 365.25,
+         CI_low = intervals(mod, which = "fixed")$fixed["date", 1] * 365.25,
+         CI_high = intervals(mod, which = "fixed")$fixed["date", 3] * 365.25) %>% 
+  select(-mod)
+
+lmm_out %>% 
+  flextable() %>% 
+  theme_booktabs() %>% 
+  autofit()
+```
+
+```{r lmm-na-table, eval = !enough_dat}
+# if there wasn't enough data to run lmms, generate a data frame full of NAs
+# because we need an output table to be generated to make the mapping script work
+lmm_out <- dat_all %>% 
+  select(reserve, set_id) %>% 
+  distinct() %>% 
+  mutate(rate = NA_real_,
+         CI_low = NA_real_,
+         CI_high = NA_real_)
+```
+
+
+```{r lmm-partialna-table, eval = partial_dat}
+# if some sites had enough data and some didn't, add the ones that didn't
+# back into the lmm_out data frame
+# for the maps
+
+# i want this included in the rate summary table
+# so it shows up in maps
+# but i don't want empty rows on the summary graphics
+
+# so i'm going to add it back to the lmm_out table
+# and then filter these sites out again later
+lmm_out <- not_enough_df %>% 
+  select(reserve, set_id) %>% 
+  distinct() %>% 
+  full_join(., lmm_out)
+```
+
+### Additional model diagnostics  
+
+```{r addl-diagnostics, eval = enough_dat}
+diagnostics_out <- models2 %>% 
+  mutate(sigma = sigma(mod),
+         AIC = AIC(mod),
+         BIC = BIC(mod),
+         logLik = mod$logLik) %>% 
+  select(-mod)
+
+diagnostics_out %>% 
+  flextable() %>% 
+  theme_booktabs() %>% 
+  autofit()
+```
+
+
+
+```{r combine-rates-mdat-slr}
+# combine different data frames into one file  
+# no condition to run this chunk because we made up a lmm_out data frame above
+# even if there hadn't been enough data to calculate rates
+
+# pick out relevant fields from the metadata to be used for mapping
+mdat_sub <- mdat %>% 
+  select(unique_set_id, user_friendly_set_name, reserve, latitude_dec_deg, longitude_dec_deg, co_dominant_species1)
+
+# join that to the rates generated by the model output above
+rate_summary <- left_join(lmm_out, mdat_sub, by = c("reserve" = "reserve", "set_id" = "unique_set_id"))
+
+# now add in slr info, and also calculate the lower and upper CI limits for SLR
+rate_summary <- left_join(rate_summary, slr_rates, by = c("reserve" = "reserve")) %>% 
+  rename(slr_rate = slr_rate_mm_yr) %>% 
+  mutate(slr_CI_low = slr_rate - x95_percent_ci,
+         slr_CI_high = slr_rate + x95_percent_ci,
+         set_slr_ratio = rate / slr_rate,
+         yr19_CI_low = slr_19yr - ci95_19yr,
+         yr19_CI_high = slr_19yr + ci95_19yr) %>% 
+  select(reserve, set_id, rate, CI_low, CI_high, slr_rate, slr_CI_low, slr_CI_high, slr_19yr, yr19_CI_low, yr19_CI_high, everything())
+
+```
+
+
+
+
+```{r slr-comp-assignment}
+# removed the "eval = enough_dat" condition from this chunk
+# because we need to write out a data frame for the mapping script
+# and this should just label everything at the sites "nonsig" if there wasn't
+# enough data to generate rates
+# i no longer like that terminology; "unknown" would be better
+# but i don't want to change the map script at this point
+# maybe "not enough information" like i have in the pie charts
+
+rates_slr_all <- rate_summary %>%
+  mutate(dir_0 = case_when(CI_high < 0 ~ "dec_sig",
+                           CI_low > 0  ~ "inc_sig",
+                           rate < 0 ~ "dec_nonsig",
+                           rate > 0 ~ "inc_nonsig",
+                           TRUE ~ "nonsig"),
+         dir_slr = case_when(CI_high < slr_CI_low ~ "dec_sig",
+                             CI_low > slr_CI_high  ~ "inc_sig",
+                             rate < slr_rate ~ "dec_nonsig",
+                             rate > slr_rate ~ "inc_nonsig",
+                             TRUE ~ "nonsig"),
+         dir_19yr = case_when(CI_high < yr19_CI_low ~ "dec_sig",
+                              CI_low > yr19_CI_high  ~ "inc_sig",
+                              rate < slr_19yr ~ "dec_nonsig",
+                              rate > slr_19yr ~ "inc_nonsig",
+                              TRUE ~ "nonsig"))
+
+```
+
+
+```{r rate-summ-file}
+# write that to a csv for use in mapping script
+write.csv(rates_slr_all, 
+          here::here("data", "intermediate", "rate_summary.csv"),
+          row.names = FALSE)
+```
+
+```{r subset-for-graphics}
+# subset that for making comparison tables
+# select only certain columns, and get rid of rows where a rate wasn't calculated
+# but the big data frame will be used in the mapping script
+rates_slr_comp <- rates_slr_all %>% 
+  select(reserve, set_id, rate, CI_low, CI_high, set_slr_ratio, dir_0, dir_slr, dir_19yr) %>% 
+  filter(!is.na(rate))
+
+# also filter NAs back out of lmm_out
+lmm_out <- lmm_out %>% 
+  filter(!is.na(rate))
+```
+
+
+***
+***
+
+
+# **FEEDBACK OPPORTUNITY**  
+
+Do you like having separate tables for each comparison (below), or would you rather collapse this into one simple table? e.g.  
+
+SET ID | Comp to 0 | CI overlaps 0? | Comp to SLR | CI overlaps SLR CI? | Comp to 19-yr | CI overlaps 19-yr CI?  
+---|---|---|---|---|---|---  
+SET-1 | higher | no | higher | no | lower | yes  
+SET-2 | higher | yes | lower | yes | lower | yes  
+SET-3 | lower | yes | lower | no | lower | no  
+
+This could take some explaining. Essentially, if the 95% CI doesn't include 0, that's the same as p < 0.05; slope differs significantly from 0. Comparisons to sea level change get more complicated because there's not a single number we're comparing to; there's a number and a confidence interval. And they're generated using different methods than what we've used to calculate the SET rates of change. So the closest we can get to "is this a significant difference" is "do the CIs overlap?" It's not exactly the same as a t-test, but it's the general idea of, "how confident are we". This same idea plays into everything else below; it's just a matter of how it's represented. So please share your thoughts.    
+
+
+# Increasing/Decreasing (Comparison to 0)  
+
+The following tables break the SETs into groups where the rate of SET elevation change is *lower than* / *higher than* / *not different from* 0. *Lower than* and *higher than* tables imply that the 95% confidence intervals for the SET's rate of change do not include 0. *Not different from* means that 0 *is* included.  
+
+
+<br>
+
+***
+
+## SET Elevation Change < 0 mm/yr  
+
+
+```{r zero-comp-lower, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_0, "dec_sig")
+```
+
+<br>
+
+***
+
+## SET Elevation Change > 0 mm/yr  
+
+
+```{r zero-comp-higher, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_0, "inc_sig")
+```
+
+<br>
+
+***
+
+## SET Elevation Change 95% CI Includes 0 mm/yr  
+
+
+```{r zero-comp-same, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_0, c("dec_nonsig", "inc_nonsig"))
+```
+
+
+***
+***
+
+
+# Sea Level Rise Comparisons  
+
+## Period of Record (long-term SLR)  
+
+The long-term local rate of sea level rise is **`r slr` +/- `r slr_ci` mm/yr** .  
+
+This rate is reported by `r slr_res$nearest_nwlon_station`, NWLON station number `r as.character(slr_res$nwlon_station_number)` based on data from *`r slr_res$data_start`* to *`r slr_res$data_end`*.  
+
+The following tables break the SETs into groups where the rate of SET elevation change is *lower than* / *higher than* / *not different from* this SLR rate. *Lower than* and *higher than* tables imply that 95% confidence intervals do not overlap between the SET and SLR. *Not different from* means that confidence intervals *do* overlap.  
+
+
+<br>
+
+<br>
+
+***
+
+## SET Elevation Change < SLR; CIs don't overlap  
+
+
+```{r slr-comp-lower, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_slr, "dec_sig")
+```
+
+<br>
+
+
+***
+
+## SET Elevation Change > SLR; CIs don't overlap
+
+
+```{r slr-comp-higher, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_slr, "inc_sig")
+```
+
+<br>
+
+***
+
+## SET Elevation Change and SLR CIs overlap  
+
+
+```{r slr-comp-same, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_slr, c("dec_nonsig", "inc_nonsig"))
+```
+
+
+***
+***
+
+
+## 19-year water level change  
+
+The local, 19-year rate of water level change is **`r yr19chng` +/- `r yr19_ci` mm/yr** .  
+
+This rate uses data reported by `r slr_res$nearest_nwlon_station`, NWLON station number `r as.character(slr_res$nwlon_station_number)` based on data from *`r slr_res$yr19_start`* to *`r slr_res$yr19_end`*.  
+
+The following tables break the SETs into groups where the rate of SET elevation change is *lower than* / *higher than* / *not different from* this 19-year rate. *Lower than* and *higher than* tables imply that 95% confidence intervals do not overlap between the SET and water level change. *Not different from* means that confidence intervals *do* overlap.  
+
+
+<br>
+
+<br>
+
+***
+
+## SET Elevation Change < 19-year water level change; CIs don't overlap  
+
+
+```{r yr19-comp-lower, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_19yr, "dec_sig")
+```
+
+<br>
+
+
+***
+
+## SET Elevation Change > 19-year water level change; CIs don't overlap
+
+
+```{r yr19-comp-higher, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_19yr, "inc_sig")
+```
+
+<br>
+
+***
+
+## SET Elevation Change and 19-year water level change CIs overlap  
+
+
+```{r yr19-comp-same, eval = enough_dat}
+rate_comp(rates_slr_comp, dir_19yr, c("dec_nonsig", "inc_nonsig"))
+```
+
+
+***
+***
+
+
+
+
+
+```{r add-veg, eval = enough_dat}
+# Add dominant veg to model_out data frame for graphing purposes
+
+lmm_out <- left_join(lmm_out, select(mdat, unique_set_id, co_dominant_species1), by = c("set_id" = "unique_set_id")) %>% 
+  rename(veg = co_dominant_species1)
+```
+
+
+## Graphical Comparison to Sea Level Rise and 0  
+
+## Sites in R's default order  
+
+
+```{r, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+# there must be a better way to do this
+
+# function arguments are what I want to be the defaults
+plot_comp_specific <- function(data = lmm_out, 
+                               plot_type = 4, 
+                               set_ids = set_id,
+                               set_ci_low = CI_low, 
+                               set_ci_high = CI_high,
+                               rates = rate, 
+                               comp1 = slr, 
+                               comp1_ci_low = slr - slr_ci, 
+                               comp1_ci_high = slr + slr_ci,
+                               comp2 = yr19chng,
+                               comp2_ci_low = yr19chng - yr19_ci,
+                               comp2_ci_high = yr19chng + yr19_ci,
+                               color_by_veg = FALSE, veg = veg){
+  
+  # feed all that stuff to the plot_rate_comps function
+  p <- plot_rate_comps(data = {{data}}, 
+                       plot_type = plot_type, 
+                       set_ids = {{set_ids}},
+                       set_ci_low = {{set_ci_low}}, 
+                       set_ci_high = {{set_ci_high}},
+                       rates = {{rates}}, 
+                       comp1 = comp1, 
+                       comp1_ci_low = comp1_ci_low, 
+                       comp1_ci_high = comp1_ci_high,
+                       comp2 = comp2,
+                       comp2_ci_low = comp2_ci_low,
+                       comp2_ci_high = comp2_ci_high,
+                       color_by_veg = color_by_veg, veg = veg)
+  p
+}
+
+
+# run it on a few things to make sure it works
+# plot_comp_specific()
+# plot_comp_specific(plot_type = 3)
+# plot_comp_specific(color_by_veg = TRUE)
+# plot_comp_specific(plot_type = 3, color_by_veg = TRUE)
+```
+
+```{r}
+# set up options for the legend in the veg plots
+leg_pos <- ifelse(opts_long$legend_side == 1, "right", "bottom")
+leg_align <- ifelse(opts_long$legend_alignment == 1, "vertical", "horizontal")
+user_leg <- theme(legend.position = leg_pos,
+                  legend.direction = leg_align)
+
+```
+
+
+```{r plot-slr-ci-lmm, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+
+# original; only long-term SLR; all CIs included
+plot_comp_specific(plot_type = 3)
+
+out_name <- paste("R_output", "figures", "summary_plots", "summary_plot.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+
+cat(paste("The above graph is saved as: ", out_name))
+```
+
+
+```{r plot-slr-ci-lmm-veg, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+# original; colored by veg
+plot_comp_specific(plot_type = 3, color_by_veg = TRUE) +
+  user_leg
+
+out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_veg.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = 1.2*opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+
+cat(paste("The above graph is saved as: ", out_name))
+```
+
+
+```{r plot-slr-ci-19yr-lmm, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+
+# add 19-year water level change; no veg coloring
+plot_comp_specific()
+
+out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_bothSLRs.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+
+cat(paste("The above graph is saved as: ", out_name))
+```
+
+
+# note to self - make a user input option for dimensions of the veg-graph too  
+
+because of the options for legend placement, the same dimensions used above don't work quite as well with these. Note to users, I'll try to improve this and add it in to the documentation.  
+
+
+```{r plot-slr-ci-lmm-veg-19yr, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+# 19-year water level change, with veg coloring
+plot_comp_specific(plot_type = 4, color_by_veg = TRUE) +
+  user_leg
+
+out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_veg_19yr.png", sep = "/")
+out_file <- here::here(out_name)
+
+ggsave(out_file, width = 1.2*opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+
+cat(paste("The above graph is saved as: ", out_name))
+```
+
+
+# Ordered (categorically) by NAVD88 elevation  
+
+
+If NAVD88 elevations were provided in the metadata, two more versions of the graph above are produced below. The SETs are ordered along the y-axis from highest to lowest elevation.
+
+```{r, eval = enough_dat}
+# first get the factors in the right order
+
+lmm_out_navd88order <- left_join(lmm_out, navd88s)
+
+a <- forcats::fct_reorder(lmm_out_navd88order$set_id,
+                          lmm_out_navd88order$set_navd88)
+
+lmm_out_navd88order$set_id2 <- a
+
+# as a condition to make the graphs:
+# the navd88s can't all be "0"
+# so the length of the vector with unique navd88s has to be longer than 1
+multiple_navd88s <- length(unique(lmm_out_navd88order$set_navd88)) > 1
+```
+
+
+
+```{r plot-slr-ci-19yr-lmm-navd88order, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+
+if(multiple_navd88s){
+  # add 19-year water level change; no veg coloring
+  p <- plot_comp_specific(data = lmm_out_navd88order,
+                          set_ids = set_id2)
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_bothSLRs_navd88ordering.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, plot = p, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+}
+```
+
+```{r plot-slr-ci-19yr-lmm-navd88order-veg, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+
+if(multiple_navd88s){
+  # add 19-year water level change; yes veg coloring
+  p <- plot_comp_specific(data = lmm_out_navd88order,
+                          set_ids = set_id2,
+                          color_by_veg = TRUE,
+                          veg = veg) +
+    user_leg
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_bothSLRs_navd88ordering_veg.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, plot = p, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+}
+```
+
+***
+
+***
+
+## Sites by a user-specified order  
+
+In order, according to specifications in the metadata; and labeled with user-friendly names. Note that no plot will be produced if there are any NAs in the metadata fields `numerical_order` or `user_friendly_set_name`.    
+
+```{r plot-slr-ci-lmm-ordered, fig.width = opts_long$width_short, fig.height = opts_long$height_short, eval = enough_dat}
+# only run this chunk if numerical order and user friendly names are specified for all SETs
+
+# friendly names need more space - up width in ggsave by 10%
+# veg legends need more space - up width in ggsave by 20%
+# if both: 25% wider???
+
+if(sum(is.na(mdat$numerical_order)) + sum(is.na(mdat$user_friendly_set_name)) == 0){
+  
+  
+  # deal with data types and orders
+  # make the set id a factor
+  lmm_out_ordered <- mdat %>% 
+    select(unique_set_id, user_friendly_set_name, numerical_order) %>%
+    left_join(lmm_out, ., by = c("set_id" = "unique_set_id")) 
+  
+  a <- forcats::fct_reorder(lmm_out_ordered$user_friendly_set_name,
+                            desc(lmm_out_ordered$numerical_order))
+  b <- forcats::fct_reorder(lmm_out_ordered$set_id,
+                            desc(lmm_out_ordered$numerical_order))
+  
+  lmm_out_ordered$user_friendly_set_name <- a
+  lmm_out_ordered$set_id2 <- b
+  
+  
+  
+  
+  
+  # original plot
+  
+  p <- plot_comp_specific(plot_type = 3, 
+                          data = lmm_out_ordered, 
+                          set_ids = user_friendly_set_name)
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+  
+  
+  
+  
+  # original, colored by veg
+  
+  p <- plot_comp_specific(plot_type = 3,
+                          data = lmm_out_ordered,
+                          set_ids = set_id2,
+                          color_by_veg = TRUE) +
+    user_leg
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered_veg.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = 1.1*opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+  
+  
+  
+  
+  # original, with user-friendly name
+  
+  p <- plot_comp_specific(data = lmm_out_ordered,
+                          plot_type = 3,
+                          set_ids = user_friendly_set_name)
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered_friendly_names.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+  
+  
+  
+  
+  
+  # original, with user-friendly names, and colored by veg
+  
+  p <- plot_comp_specific(data = lmm_out_ordered,
+                          plot_type = 3,
+                          set_ids = user_friendly_set_name,
+                          color_by_veg = TRUE) +
+    user_leg
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered_friendly_names_veg.png", sep = "/")
+  out_file <- here::here(out_name)
+  # because the legend is pretty wide for the plots with veg coloring, I'm saving them 20% wider than specified. this makes the final dimensions of the main panel comparable to the non-veg plots.
+  ggsave(out_file, p, width = 1.1*opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+  
+  
+  
+  
+  # 19-year change added
+  
+  p <- plot_comp_specific(plot_type = 4, 
+                          data = lmm_out_ordered, 
+                          set_ids = user_friendly_set_name)
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered_with19yr.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+  
+  
+  
+  
+  # original, colored by veg
+  
+  p <- plot_comp_specific(plot_type = 4,
+                          data = lmm_out_ordered,
+                          set_ids = set_id2,
+                          color_by_veg = TRUE) +
+    user_leg
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered_with_19yr_veg.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = 1.1*opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+  
+  
+  
+  
+  # original, with user-friendly name
+  
+  p <- plot_comp_specific(data = lmm_out_ordered,
+                          plot_type = 4,
+                          set_ids = user_friendly_set_name)
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered_friendly_names_with_19yr.png", sep = "/")
+  out_file <- here::here(out_name)
+  
+  ggsave(out_file, p, width = opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+  
+  
+  
+  
+  
+  # original, with user-friendly names, and colored by veg
+  
+  p <- plot_comp_specific(data = lmm_out_ordered,
+                          plot_type = 4,
+                          set_ids = user_friendly_set_name,
+                          color_by_veg = TRUE) +
+    user_leg
+  
+  print(p)
+  
+  out_name <- paste("R_output", "figures", "summary_plots", "summary_plot_ordered_friendly_names_with19yr_veg.png", sep = "/")
+  out_file <- here::here(out_name)
+  # because the legend is pretty wide for the plots with veg coloring, I'm saving them 20% wider than specified. this makes the final dimensions of the main panel comparable to the non-veg plots.
+  ggsave(out_file, p, width = 1.1*opts_long$width_short, height = opts_long$height_short, scale = 0.8)
+  
+  cat(paste("The above graph is saved as: ", out_name))
+}
+
+```
+
+
+
+***
+
+## MAPS  
+
+The way these maps are rendered below (and even *if* they are rendered) depends on many things. The script `R_scripts/04_interact_maps.R` will let you interact with the maps, and you can either take a screenshot or use the `Export` command from RStudio's Viewer pane to save a version that looks better.  
+
+
+```{r map-script-source}
+source(here::here("R_scripts", "sourced", "006_map_making_static.R"))
+```
+
+
+### Comparisons to 0  
+
+
+```{r map0}
+m0
+```
+
+### Comparisons to long-term SLR  
+
+```{r mapSLR}
+mSLR
+```
+
+
+### Comparisons to 19-yr water level change  
+
+```{r map19yr}
+m19yr
+```

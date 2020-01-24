@@ -1,0 +1,16 @@
+Reserve,Nearest NWLON station,Distance to NWLON Station,NWLON Station Number,SLR rate (mm/yr),+/- (95% CI),data start,data end,set start,slr_19yr,ci95_19yr,yr19_start,yr19_end,link
+APA,"Apalachicola, Florida",,8728690,2.23,0.64,1967,2017,2012,5.22,2.57,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8728690#tab50yr
+CBM,"Solomons Island, MD","60km from MB....55km downriver from JB, nothing closer with sufficient data",8577330,3.82,0.24,1937,2018,2010,7.15,1.67,1999,2018,https://tidesandcurrents.noaa.gov/stationhome.html?id=8577330
+CBV,"Sewell's Point, Norfolk, VA","30km to Goodwin, 42 kim to Catlett Islands",8638610,4.66,0.22,1927,2018,2007,7.19,2,1999,2018,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8638610
+DEL,"Lewes, Delaware",,8557380,3.44,0.24,1919,2017,2004,4.69,2.02,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8557380
+ELK,"Monterey, California",,9413450,1.57,0.82,1973,2018,2006,5.19,1.88,1999,2018,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?stnid=9413450
+GND,"Dauphin Island, Alabama",,8735180,3.61,0.59,1966,2017,2012,7.37,3.18,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8735180
+GRB,"Boston, Massachusetts",77km (nothing closer with a recent record),8443970,2.82,0.16,1921,2017,1999,4.92,1.89,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8443970
+GTM,"Mayport, Jacksonville, FL",27.2-92km depending on station,8720218,2.62,0.25,1928,2018,2012,4.66,2.47,1999,2018,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8720218
+MAR,"Rockport, TX",14-30 km (depending on site),8774770,5.62,0.48,1937,2018,2013,8.57,2.48,1999,2018,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8774770
+NAR,"Newport, Rhode Island",15 km,8452660,2.77,0.16,1930,2018,2012,4.81,1.49,1999,2018,https://tidesandcurrents.noaa.gov/stationhome.html?id=8452660
+PDB,"Friday Harbor, Washington",35km,9449880,1.19,0.27,1934,2017,2002,3.31,2.4,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=9449880
+SOS,"Charleston, Oregon",1-8km (depending on site),9432780,1.12,0.77,1970,2017,2011,2.31,2.71,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=9432780
+WEL,"Portland, Maine",42-45km ,8418150,1.88,0.14,1912,2018,2011,4.54,1.99,1999,2018,https://tidesandcurrents.noaa.gov/stationhome.html?id=8418150
+WKB,"Dauphin Island, Alabama",31km (Weeks Bay station no SLR trends),8735180,3.61,0.59,1966,2017,2015,7.37,3.18,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8735180
+WQB,"Woods Hole, Massachusetts",14 km,8447930,2.86,0.17,1932,2017,2013,4.32,1.56,1998,2017,https://tidesandcurrents.noaa.gov/sltrends/sltrends_station.shtml?id=8447930
