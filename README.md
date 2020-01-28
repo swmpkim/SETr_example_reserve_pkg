@@ -1,6 +1,17 @@
 # SETr Example Reserve Package  
 
-This is a full example, using Grand Bay's data, of what participating reserves will receive with their own data at the end of the SETr project (2/28/2020). We welcome any feedback that you end-users have. Some specifics on what we still especially need are below. Track changes is great for any of the Word documents. Please send any thoughts to Kim and Suzanne by **Friday, 2/7**.   
+Welcome **rstudio::conf(2020)** attendees! This is a full example, with some language still in extremely draft-y form, of the workflow and outputs of the NERRS Science Collaborative-funded project "Is marsh surface tracking sea level change? Developing tools and visualizations for NERRS Sentinel Site Data". The powerpoint of the interactive e-poster that brought you here is also online: https://github.com/swmpkim/rstudioconf2020_eposter  
+
+Evolving code for the project is here:
+https://github.com/swmpkim/SETr_Reserve_Template
+
+Outputs will eventually be archived at:
+http://nerrssciencecollaborative.org/
+
+
+# NERR staff:  
+
+This is a full example, using Grand Bay's data, of what participating reserves will receive with their own data at the end of the SETr project (2/28/2020). We welcome any feedback that you, end-users, have. Some specifics on what we still especially need are below. Track changes is great for any of the Word documents. Please send any thoughts to Kim and Suzanne by **Friday, 2/7**.   
 
 +  Feedback on the outreach document is still in the process of being incorporated. Some changes have been made so it's worth a look; don't get too hung up on anything that's obviously still messy though.   
 
