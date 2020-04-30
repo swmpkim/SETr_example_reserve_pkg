@@ -1,0 +1,1 @@
+This document is a placeholder, to ensure the correct folder structure is transferred to GitHub and RStudioCloud.

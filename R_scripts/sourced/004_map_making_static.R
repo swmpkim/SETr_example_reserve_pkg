@@ -1,6 +1,10 @@
-# run this at the end of the Word report script (after 005)
+# run this at the end of the Word report script (after 002)
 library(leaflet)
 library(mapview)
+
+# save a log file just in case
+log_name <- paste0(Sys.Date(), "_004mapsstatic_logfile.txt")
+writeLines(capture.output(sessionInfo()), here::here("R_output", "log_files", log_name))
 
 # map differences
 # dir_0 is comparison to 0
@@ -10,7 +14,9 @@ library(mapview)
 # join coordinates with the rate results, and categorize the rates
 to_map <- rates_slr_all %>%
     rename(lat = latitude_dec_deg,
-           long = longitude_dec_deg)
+           long = longitude_dec_deg) %>% 
+    filter(!is.na(lat),
+           !is.na(long))
 
 
 # read in images to use as map icons
